@@ -1,4 +1,3 @@
-
 import argparse
 import os
 import random
@@ -6,7 +5,8 @@ import shutil
 import time
 import warnings
 from enum import Enum
-
+from typing import Optional, Callable, Any
+from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -19,6 +19,7 @@ import torch.utils.data.distributed
 import torchvision.datasets as datasets
 import torchvision.models as models
 import torchvision.transforms as transforms
+from torchvision.datasets import folder, vision 
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Subset
 
@@ -27,7 +28,7 @@ model_names = sorted(name for name in models.__dict__
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR', nargs='?', default='imagenet',
+parser.add_argument('data', metavar='DIR', nargs='?', default = r"../data/vanadium/tiny-imagenet-200/tiny-imagenet-200",
                     help='path to dataset (default: imagenet)')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                     choices=model_names,
@@ -40,7 +41,7 @@ parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=128, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
@@ -54,7 +55,7 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
+parser.add_argument('--resume', default=r'../output', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
@@ -226,8 +227,8 @@ def main_worker(gpu, ngpus_per_node, args):
     # Data loading code
     if args.dummy:
         print("=> Dummy data is used!")
-        train_dataset = datasets.FakeData(1281167, (3, 224, 224), 1000, transforms.ToTensor())
-        val_dataset = datasets.FakeData(50000, (3, 224, 224), 1000, transforms.ToTensor())
+        train_dataset = datasets.FakeData(1281167, (3, 64, 64), 200, transforms.ToTensor())
+        val_dataset = datasets.FakeData(50000, (3, 64, 64), 200, transforms.ToTensor())
     else:
         traindir = os.path.join(args.data, 'train')
         valdir = os.path.join(args.data, 'val')
@@ -237,17 +238,25 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset = datasets.ImageFolder(
             traindir,
             transforms.Compose([
-                transforms.RandomResizedCrop(224),
+                transforms.RandomResizedCrop(64),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 normalize,
             ]))
 
-        val_dataset = datasets.ImageFolder(
+        """  val_dataset = datasets.ImageFolder(
             valdir,
             transforms.Compose([
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
+                transforms.Resize(64),
+                transforms.CenterCrop(64),
+                transforms.ToTensor(),
+                normalize,
+            ])) """
+        val_dataset = ValidateDir(
+            valdir,
+            transforms.Compose([
+                transforms.RandomResizedCrop(64),
+                transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 normalize,
             ]))
@@ -270,16 +279,18 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
+    
+    writer = SummaryWriter('./tensorboard_data')
 
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, device, args)
+        train(train_loader, model, criterion, optimizer, epoch, device, args, writer)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        acc1 = validate(val_loader, model, criterion, args, epoch, writer)
         
         scheduler.step()
         
@@ -299,7 +310,7 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, device, args):
+def train(train_loader, model, criterion, optimizer, epoch, device, args, writer):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -317,7 +328,6 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
-
         # move data to the same device as model
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
@@ -337,6 +347,10 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         loss.backward()
         optimizer.step()
 
+        writer.add_scalar('train accuracy@1',acc1[0], epoch)
+        writer.add_scalar('train accuracy@5',acc5[0], epoch)
+        writer.add_scalar('train loss@5',loss.item(), epoch)
+
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
@@ -345,7 +359,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
             progress.display(i + 1)
 
 
-def validate(val_loader, model, criterion, args):
+def validate(val_loader, model, criterion, args, epoch, writer):
 
     def run_validate(loader, base_progress=0):
         with torch.no_grad():
@@ -370,7 +384,10 @@ def validate(val_loader, model, criterion, args):
                 top1.update(acc1[0], images.size(0))
                 top5.update(acc5[0], images.size(0))
 
-                # measure elapsed time
+                writer.add_scalar('validate accuracy@1',acc1[0], epoch)
+                writer.add_scalar('validate accuracy@5',acc5[0], epoch)
+                writer.add_scalar('validate loss@5',loss.item(), epoch)
+                        # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
 
@@ -411,6 +428,63 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+
+
+class ValidateDir(vision.VisionDataset):
+    def __init__(
+        self,
+        root: str,
+        transform: Optional[Callable] = None,
+        target_transform: Optional[Callable] = None,
+        loader: Callable[[str], Any] = folder.default_loader,
+        #is_valid_file: Optional[Callable[[str], bool]] = None,
+    ):
+        super().__init__(root, transform=transform, target_transform=target_transform)
+        self.loader = loader
+
+        self.transform = transform
+        self.target_transform = target_transform
+        wnids_path = os.path.dirname(root)
+        wnids_path = os.path.join(wnids_path, 'wnids.txt')
+        with open(wnids_path, 'r', encoding='utf-8') as f:
+            image_ids = f.read().splitlines()
+        image_root = os.path.join(root, 'images')
+        annotations_path = os.path.join(root, 'val_annotations.txt')
+        number = 0
+        samples = []
+        class_to_idx = {}
+        with open(annotations_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            for image_id in image_ids:
+                for line in lines:
+                    if image_id in line:
+                        name = str.split(line)[0].strip()
+                        image_path = os.path.join(image_root, name)
+                        samples.append((image_path, number))
+                        class_to_idx.update({image_id: number})
+                number += 1
+
+        self.samples = samples
+        self.targets = [s[1] for s in samples]
+        self.imgs = self.samples
+        self.classes = image_ids
+        self.class_to_idx = class_to_idx
+           
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        target = sample[1]
+        sample = self.loader(sample[0])
+        if self.transform is not None:
+            sample = self.transform(sample)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return sample, target
+
+    
+    def __len__(self):
+        return len(self.samples)
+    
 
 class Summary(Enum):
     NONE = 0
