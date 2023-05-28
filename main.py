@@ -55,7 +55,7 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--resume', default=r'.', type=str, metavar='PATH',
+parser.add_argument('--resume', default=r'./output', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
@@ -81,7 +81,10 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 parser.add_argument('--dummy', action='store_true', help="use fake data to benchmark")
 
 best_acc1 = 0
-
+global writer
+writer = SummaryWriter('./tensorboard_data')
+global start_time
+start_time = time.time()
 
 def main():
     
@@ -147,8 +150,7 @@ def main_worker(gpu, ngpus_per_node, args):
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
 
-    if True:
-    #not torch.cuda.is_available() and not torch.backends.mps.is_available():
+    if not torch.cuda.is_available() and not torch.backends.mps.is_available():
         print('using CPU, this will be slow')
     elif args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
@@ -282,10 +284,6 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
     
-    global writer
-    writer = SummaryWriter('./tensorboard_data')
-    global start_time
-    start_time = time.time()
 
     for epoch in range(args.start_epoch, args.epochs):
 
@@ -356,7 +354,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         run_time = time.time() - start_time
         writer.add_scalar('train accuracy@1',acc1[0], run_time)
         writer.add_scalar('train accuracy@5',acc5[0], run_time)
-        writer.add_scalar('train loss',loss.item(), run_time)
+        writer.add_scalar('train loss@5',losses.avg, run_time)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -397,11 +395,6 @@ def validate(val_loader, model, criterion, args):
                 losses.update(loss.item(), images.size(0))
                 top1.update(acc1[0], images.size(0))
                 top5.update(acc5[0], images.size(0))
-
-                run_time = time.time() - start_time
-                writer.add_scalar('validate accuracy@1', acc1[0], run_time)
-                writer.add_scalar('validate accuracy@5', acc5[0], run_time)
-                writer.add_scalar('validate loss',loss.item(), run_time)
                 
                 # measure elapsed time
                 batch_time.update(time.time() - end)
@@ -419,6 +412,10 @@ def validate(val_loader, model, criterion, args):
         [batch_time, losses, top1, top5],
         prefix='Test: ')
     
+    run_time = time.time() - start_time
+    writer.add_scalar('validate accuracy@1',top1.avg, run_time)
+    writer.add_scalar('validate accuracy@5',top5.avg, run_time)
+    writer.add_scalar('validate loss@5',losses.avg, run_time)
 
     # switch to evaluate mode
     model.eval()
